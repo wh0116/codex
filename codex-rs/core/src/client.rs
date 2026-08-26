@@ -129,6 +129,7 @@ use codex_model_provider::ProviderAuthScope;
 use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
+use codex_model_provider::is_first_party_responses_provider;
 #[cfg(test)]
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
@@ -896,13 +897,23 @@ impl ModelClient {
             )
         };
         let reasoning = Self::build_reasoning(model_info, effort, summary);
+        // 第三方 OpenAI 兼容端点不支持 OpenAI 专有请求扩展（reasoning summary、
+        // encrypted reasoning content include、prompt_cache_key、client_metadata 等），
+        // 误发送会导致请求被拒（400 json: unknown field）。仅一方端点保留。
+        let first_party = is_first_party_responses_provider(self.state.provider.info());
+        let mut reasoning = reasoning;
+        if !first_party {
+            reasoning.summary = None;
+        }
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
             && is_openai
             && reasoning.summary.is_some())
         .then_some(StreamOptions {
             reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
         });
-        let include = vec!["reasoning.encrypted_content".to_string()];
+        let include = first_party
+            .then(|| vec!["reasoning.encrypted_content".to_string()])
+            .unwrap_or_default();
         let verbosity = if model_info.support_verbosity {
             self.state.model_verbosity.or(model_info.default_verbosity)
         } else {
@@ -919,7 +930,7 @@ impl ModelClient {
             &prompt.output_schema,
             prompt.output_schema_strict,
         );
-        let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
+        let prompt_cache_key = first_party.then(|| self.prompt_cache_key(responses_metadata));
         let service_tier = model_info.service_tier_for_request(service_tier);
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
@@ -936,7 +947,7 @@ impl ModelClient {
             service_tier,
             prompt_cache_key,
             text,
-            client_metadata: Some(responses_metadata.client_metadata()),
+            client_metadata: first_party.then(|| responses_metadata.client_metadata()),
         };
         Ok(request)
     }
