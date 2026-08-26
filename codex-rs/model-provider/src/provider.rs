@@ -354,6 +354,13 @@ fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) -> bool {
         && provider.aws.is_none()
 }
 
+/// 一方 Responses 端点（OpenAI 官方或 Azure Responses 同构端点）判定。
+/// 仅一方端点支持 OpenAI 专有的请求扩展（namespace tools、reasoning summary、
+/// encrypted reasoning content 等）；第三方 OpenAI 兼容端点须按最小兼容面请求。
+pub fn is_first_party_responses_provider(info: &ModelProviderInfo) -> bool {
+    info.is_openai() || is_azure_responses_provider(&info.name, info.base_url.as_deref())
+}
+
 /// Creates the default runtime model provider for configured provider metadata.
 pub fn create_model_provider(
     provider_info: ModelProviderInfo,
@@ -408,9 +415,12 @@ impl ModelProvider for ConfiguredModelProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        let remote_compaction = if self.info.is_openai()
-            || is_azure_responses_provider(&self.info.name, self.info.base_url.as_deref())
-        {
+        // 一方端点（OpenAI 官方或 Azure Responses 同构端点）才宣告 OpenAI 专有能力；
+        // 第三方 OpenAI 兼容端点（如火山方舟）不支持 namespace tools / hosted web_search
+        // / image_generation 等专有能力，误宣告会导致请求被拒
+        // （400 InvalidParameter: unknown tool type: namespace）。
+        let first_party = is_first_party_responses_provider(&self.info);
+        let remote_compaction = if first_party {
             RemoteCompactionSupport::V2
         } else {
             RemoteCompactionSupport::Unsupported
@@ -418,6 +428,9 @@ impl ModelProvider for ConfiguredModelProvider {
 
         ProviderCapabilities {
             remote_compaction,
+            namespace_tools: first_party,
+            web_search: first_party,
+            image_generation: first_party,
             ..ProviderCapabilities::default()
         }
     }
@@ -764,6 +777,18 @@ mod tests {
                 ..ProviderCapabilities::default()
             }
         );
+    }
+
+    #[test]
+    fn third_party_provider_does_not_claim_namespace_tools() {
+        // 第三方 OpenAI 兼容端点（如火山方舟）不支持 namespace tools 专有工具类型，
+        // 宣告支持会导致模型请求被 400 拒绝（unknown tool type: namespace）。
+        let provider = create_model_provider(
+            provider_for("https://ark.cn-beijing.volces.com/api/v3".to_string()),
+            /*auth_manager*/ None,
+        );
+
+        assert!(!provider.capabilities().namespace_tools);
     }
 
     #[test]

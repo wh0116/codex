@@ -37,6 +37,7 @@ pub use provider::ProviderUnauthorizedRecovery;
 pub use provider::RemoteCompactionSupport;
 pub use provider::SharedModelProvider;
 pub use provider::create_model_provider;
+pub use provider::is_first_party_responses_provider;
 
 #[cfg(test)]
 #[path = "workspace_routing_tests.rs"]
