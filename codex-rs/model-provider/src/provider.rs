@@ -51,6 +51,12 @@ pub enum RemoteCompactionSupport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     pub namespace_tools: bool,
+    /// OpenAI 专有的 Freeform（custom）工具类型支持。
+    ///
+    /// code mode 的 `exec` 工具与 `apply_patch` 以 `type: "custom"`（Freeform）
+    /// 形态下发，这是一方 Responses 端点的专有扩展；第三方 OpenAI 兼容端点
+    /// 会以 400 拒绝（unknown tool type: custom）。
+    pub custom_tools: bool,
     pub image_generation: bool,
     pub web_search: bool,
     pub external_web_access: bool,
@@ -61,6 +67,7 @@ impl Default for ProviderCapabilities {
     fn default() -> Self {
         Self {
             namespace_tools: true,
+            custom_tools: true,
             image_generation: true,
             web_search: true,
             external_web_access: true,
@@ -417,8 +424,8 @@ impl ModelProvider for ConfiguredModelProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         // 一方端点（OpenAI 官方或 Azure Responses 同构端点）才宣告 OpenAI 专有能力；
         // 第三方 OpenAI 兼容端点（如火山方舟）不支持 namespace tools / hosted web_search
-        // / image_generation 等专有能力，误宣告会导致请求被拒
-        // （400 InvalidParameter: unknown tool type: namespace）。
+        // / image_generation / Freeform（custom）工具等专有能力，误宣告会导致请求被拒
+        // （400 InvalidParameter: unknown tool type: namespace / custom）。
         let first_party = is_first_party_responses_provider(&self.info);
         let remote_compaction = if first_party {
             RemoteCompactionSupport::V2
@@ -429,6 +436,7 @@ impl ModelProvider for ConfiguredModelProvider {
         ProviderCapabilities {
             remote_compaction,
             namespace_tools: first_party,
+            custom_tools: first_party,
             web_search: first_party,
             image_generation: first_party,
             ..ProviderCapabilities::default()
@@ -789,6 +797,28 @@ mod tests {
         );
 
         assert!(!provider.capabilities().namespace_tools);
+    }
+
+    #[test]
+    fn third_party_provider_does_not_claim_custom_tools() {
+        // 第三方 OpenAI 兼容端点（如火山方舟）不支持 Freeform（custom）专有工具类型，
+        // 宣告支持会导致模型请求被 400 拒绝（unknown tool type: custom）。
+        let provider = create_model_provider(
+            provider_for("https://ark.cn-beijing.volces.com/api/v3".to_string()),
+            /*auth_manager*/ None,
+        );
+
+        assert!(!provider.capabilities().custom_tools);
+    }
+
+    #[test]
+    fn first_party_provider_claims_custom_tools() {
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            /*auth_manager*/ None,
+        );
+
+        assert!(provider.capabilities().custom_tools);
     }
 
     #[test]

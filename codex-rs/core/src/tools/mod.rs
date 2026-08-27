@@ -84,9 +84,13 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
 
 pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
     let requested_tool_mode = requested_tool_mode(turn_context, model_info);
-    if !turn_context.code_mode_available
-        && requested_tool_mode == ToolMode::CodeMode
+    if requested_tool_mode == ToolMode::CodeMode
         && !turn_context.config.code_mode.disable_in_process_fallback
+        && (!turn_context.code_mode_available
+            // code mode 的 exec 工具以 Freeform（type: "custom"）形态下发，属于一方
+            // Responses 端点专有扩展；第三方 OpenAI 兼容端点（如火山方舟）会以 400
+            // 拒绝（unknown tool type: custom），回退 Direct 模式的 function 工具集。
+            || !turn_context.provider.capabilities().custom_tools)
     {
         ToolMode::Direct
     } else {

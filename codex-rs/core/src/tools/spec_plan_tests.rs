@@ -2731,6 +2731,49 @@ async fn code_mode_excludes_default_namespace_tools() {
 }
 
 #[tokio::test]
+async fn third_party_provider_falls_back_to_direct_tools_in_code_mode() {
+    // 第三方 OpenAI 兼容端点（如火山方舟）不支持 Freeform（type: "custom"）工具，
+    // code mode 的 exec 工具会被端点以 400 拒绝（unknown tool type: custom），
+    // 因此启用 code mode 时也必须回退 Direct 模式的 function 工具集。
+    let third_party_provider = create_model_provider(
+        ModelProviderInfo {
+            name: "Volcengine Ark".to_string(),
+            base_url: Some("https://ark.cn-beijing.volces.com/api/v3".to_string()),
+            requires_openai_auth: false,
+            ..ModelProviderInfo::default()
+        },
+        /*auth_manager*/ None,
+    );
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::CodeMode, /*enabled*/ true);
+        turn.provider = third_party_provider;
+    })
+    .await;
+
+    plan.assert_visible_lacks(&[codex_code_mode::PUBLIC_TOOL_NAME]);
+    // Direct 模式的 function 工具集仍然完整可用（exec_command 由 shell 处理器注册，
+    // 名称依赖 shell 类型，这里断言 update_plan 等通用 function 工具存在）。
+    plan.assert_visible_contains(&["update_plan"]);
+    assert!(plan.visible_specs.iter().all(|spec| {
+        !matches!(spec, ToolSpec::Freeform(_) | ToolSpec::Namespace(_))
+    }));
+}
+
+#[tokio::test]
+async fn first_party_provider_keeps_code_mode_exec_tool() {
+    // 一方端点保持 code mode 语义：exec 以 Freeform 形态下发。
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::CodeMode, /*enabled*/ true);
+    })
+    .await;
+
+    assert!(matches!(
+        plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME),
+        ToolSpec::Freeform(_)
+    ));
+}
+
+#[tokio::test]
 async fn multi_agent_feature_selects_one_agent_tool_family() {
     let v1 = probe(|turn| {
         set_feature(turn, Feature::Collab, /*enabled*/ true);
