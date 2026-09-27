@@ -842,3 +842,56 @@ fn test_invocation(
         },
     }
 }
+
+#[test]
+fn tool_lookup_resolves_flat_mcp_names_to_namespaced_registry_keys() {
+    let registry = ToolRegistry::from_tools([Arc::new(TestHandler {
+        tool_name: codex_tools::ToolName::namespaced("mcp__desktop__", "run"),
+    }) as Arc<dyn CoreToolRuntime>]);
+
+    // 第三方端点降级路径：模型以扁平全名调用，应回退命中 namespaced 注册项。
+    let flat_name = codex_tools::ToolName::plain("mcp__desktop__run");
+    assert!(
+        registry.tool(&flat_name).is_some(),
+        "flat MCP tool name should resolve via display-name fallback"
+    );
+    assert_eq!(
+        registry.canonical_tool_key(&flat_name),
+        Some(codex_tools::ToolName::namespaced(
+            "mcp__desktop__",
+            "run"
+        ))
+    );
+
+    // 未注册的扁平名不应命中。
+    assert!(
+        registry
+            .tool(&codex_tools::ToolName::plain("mcp__desktop__missing"))
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn dispatch_normalizes_flat_mcp_names_to_registry_keys() -> anyhow::Result<()> {
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    let handler = Arc::new(LifecycleTestHandler {
+        tool_name: codex_tools::ToolName::namespaced("mcp__desktop__", "run"),
+        result: LifecycleTestResult::Ok { success: true },
+    });
+    let registry = ToolRegistry::from_tools([handler as Arc<dyn CoreToolRuntime>]);
+
+    // 模型以扁平全名调用：归一化后 handler 收到的 tool_name 应为注册键，
+    // 否则 LifecycleTestHandler 的内部断言会失败。
+    registry
+        .dispatch_any_with_terminal_outcome(
+            test_invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "flat-call",
+                codex_tools::ToolName::plain("mcp__desktop__run"),
+            ),
+            /*terminal_outcome_reached*/ None,
+        )
+        .await?;
+    Ok(())
+}

@@ -327,6 +327,18 @@ fn use_bedrock_provider(turn: &mut TurnContext) {
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
 }
 
+/// 构造非一方 Responses 端点（非 OpenAI/Azure/Bedrock），namespace_tools 应为 false。
+fn use_third_party_responses_provider(turn: &mut TurnContext) {
+    let mut provider_info = turn.config.model_provider.clone();
+    provider_info.name = "third_party_responses".to_string();
+    provider_info.base_url = Some("https://third-party.example.com/v1".to_string());
+    update_config(turn, |config| {
+        config.model_provider_id = "third_party_responses".to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
 struct TestNamespaceExtensionTool {
     namespace: &'static str,
     tool_name: &'static str,
@@ -1586,6 +1598,54 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
         reserved_namespace.visible_spec("tool_search"),
         ToolSpec::ToolSearch { .. }
     ));
+}
+
+#[tokio::test]
+async fn third_party_provider_flattens_mcp_namespace_into_plain_function() {
+    // 第三方端点（namespace_tools=false）：MCP Namespace spec 应降级展开为
+    // 顶层扁平 Function，工具名取 `{namespace}{name}` 全名，而不是整体消失。
+    let flattened = probe_with(
+        |turn| {
+            use_third_party_responses_provider(turn);
+        },
+        ToolPlanInputs {
+            tool_runtimes: vec![mcp_runtime(
+                "direct",
+                "mcp__direct__",
+                "lookup",
+                ToolExposure::Direct,
+            )],
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+    flattened.assert_visible_contains(&["mcp__direct__lookup"]);
+    assert!(matches!(
+        flattened.visible_spec("mcp__direct__lookup"),
+        ToolSpec::Function(_)
+    ));
+
+    // 一方端点（namespace_tools=true）：保持 Namespace spec 形态不变。
+    let first_party = probe_with(
+        |turn| {
+            use_chatgpt_auth(turn);
+        },
+        ToolPlanInputs {
+            tool_runtimes: vec![mcp_runtime(
+                "direct",
+                "mcp__direct__",
+                "lookup",
+                ToolExposure::Direct,
+            )],
+            ..ToolPlanInputs::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        first_party.namespace_function_names("mcp__direct__"),
+        &["lookup".to_string()]
+    );
+    first_party.assert_visible_lacks(&["mcp__direct__lookup"]);
 }
 
 #[tokio::test]
