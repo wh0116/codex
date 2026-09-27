@@ -444,10 +444,33 @@ impl ToolRegistry {
         Self::from_tools([handler as Arc<dyn CoreToolRuntime>])
     }
 
+    /// 按模型侧工具名解析注册项，返回（注册键, 注册项）。
+    ///
+    /// 常规路径以 `with_default_namespace` 后的键直接命中；回退路径服务于
+    /// 第三方端点降级：MCP 工具以 namespaced 键注册（Display 即扁平全名，
+    /// 如 `mcp__server__tool`），而降级后模型以扁平全名直接调用。按显示名
+    /// 全等匹配唯一注册项，仅在前缀命中失败时触发。
+    fn resolve(&self, name: &ToolName) -> Option<(&ToolName, &RegisteredTool)> {
+        let key = name.clone().with_default_namespace();
+        if let Some((_, key, tool)) = self.tools.get_full(&key) {
+            return Some((key, tool));
+        }
+        if key.is_default_namespace() {
+            return self.tools.iter().find(|(registered, _)| {
+                !registered.is_default_namespace() && registered.to_string() == key.name
+            });
+        }
+        None
+    }
+
+    /// 返回模型侧工具名对应的注册键；未注册时为 None。
+    pub(crate) fn canonical_tool_key(&self, name: &ToolName) -> Option<ToolName> {
+        self.resolve(name).map(|(key, _)| key.clone())
+    }
+
     pub(crate) fn tool(&self, name: &ToolName) -> Option<Arc<dyn CoreToolRuntime>> {
-        self.tools
-            .get(&name.clone().with_default_namespace())
-            .map(|tool| Arc::clone(&tool.runtime))
+        self.resolve(name)
+            .map(|(_, tool)| Arc::clone(&tool.runtime))
     }
 
     #[cfg(test)]
@@ -459,9 +482,7 @@ impl ToolRegistry {
 
     #[cfg(test)]
     pub(crate) fn tool_exposure(&self, name: &ToolName) -> Option<ToolExposure> {
-        self.tools
-            .get(&name.clone().with_default_namespace())
-            .map(|tool| tool.exposure)
+        self.resolve(name).map(|(_, tool)| tool.exposure)
     }
 
     pub(crate) fn create_diff_consumer(
@@ -472,7 +493,7 @@ impl ToolRegistry {
     }
 
     pub(crate) fn supports_parallel_tool_calls(&self, name: &ToolName) -> Option<bool> {
-        let tool = self.tools.get(&name.clone().with_default_namespace())?;
+        let (_, tool) = self.resolve(name)?;
         Some(tool.exposure != ToolExposure::Hidden && tool.runtime.supports_parallel_tool_calls())
     }
 
@@ -490,6 +511,12 @@ impl ToolRegistry {
         mut invocation: ToolInvocation,
         terminal_outcome_reached: Option<Arc<AtomicBool>>,
     ) -> Result<AnyToolResult, FunctionCallError> {
+        // 第三方端点降级时，模型可能以扁平全名（如 mcp__server__tool）调用
+        // namespace 工具；先归一化为注册键，保证 handler 收到的 tool_name
+        // 与注册键一致（hook/遥测/审批上下文均依赖该约定）。
+        if let Some(canonical) = self.canonical_tool_key(&invocation.tool_name) {
+            invocation.tool_name = canonical;
+        }
         let tool_name = invocation.tool_name.clone();
         let tool_name_flat = flat_tool_name(&tool_name);
         let call_id_owned = invocation.call_id.clone();

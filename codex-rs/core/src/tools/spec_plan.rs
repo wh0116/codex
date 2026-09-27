@@ -516,9 +516,39 @@ fn build_model_visible_specs(
 
     merge_into_namespaces(specs)
         .into_iter()
-        .filter(|spec| {
-            namespace_tools_enabled(turn_context) || !matches!(spec, ToolSpec::Namespace(_))
+        .flat_map(|spec| match spec {
+            // 第三方端点不支持 namespace 工具（provider capabilities.namespace_tools
+            // = false），但 MCP 工具天生以 Namespace spec 暴露。此处降级展开为顶层
+            // Function（工具名取 `{namespace}{name}` 扁平全名），避免 MCP 工具在
+            // 第三方模型侧整体不可见。
+            ToolSpec::Namespace(namespace) if !namespace_tools_enabled(turn_context) => {
+                flatten_namespace_spec(namespace)
+            }
+            spec => vec![spec],
         })
+        .collect()
+}
+
+/// 将 Namespace spec 降级展开为顶层 Function specs（第三方端点兼容路径）。
+/// Function 工具改用扁平全名 `{namespace}{name}`（如 mcp__server__tool），与
+/// ToolName::Display 及 hook 工具命名约定一致；custom（Freeform）工具是一方
+/// 专有能力，第三方端点直接丢弃。
+fn flatten_namespace_spec(namespace: ResponsesApiNamespace) -> Vec<ToolSpec> {
+    let ResponsesApiNamespace {
+        name: namespace_name,
+        tools,
+        ..
+    } = namespace;
+    tools
+        .into_iter()
+        .filter_map(|tool| match tool {
+            ResponsesApiNamespaceTool::Function(mut function) => {
+                function.name = format!("{namespace_name}{}", function.name);
+                Some(function)
+            }
+            ResponsesApiNamespaceTool::Custom(_) => None,
+        })
+        .map(ToolSpec::Function)
         .collect()
 }
 
